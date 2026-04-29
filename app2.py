@@ -40,6 +40,9 @@ class AudioConverter:
         # 声道处理模式
         self.channel_mode = tk.StringVar(value="mix")  # mix, left, right
 
+        # 音量过滤阈值（分贝），留空则不过滤
+        self.volume_threshold = tk.StringVar(value="-20")
+
         # 创建UI（带滚动条）
         self.create_scrollable_ui()
 
@@ -191,6 +194,21 @@ class AudioConverter:
             text="覆盖已存在的文件（如果不勾选，自动添加序号）",
             variable=self.overwrite,
         ).pack(anchor="w", pady=2)
+
+        # 音量过滤选项
+        volume_frame = tk.LabelFrame(main_frame, text="音量过滤", padx=5, pady=5)
+        volume_frame.pack(fill="x", padx=10, pady=5)
+
+        volume_row = tk.Frame(volume_frame)
+        volume_row.pack(fill="x", pady=2)
+        tk.Label(volume_row, text="过滤音量低于 ").pack(side="left", padx=5)
+        self.volume_entry = tk.Entry(
+            volume_row, textvariable=self.volume_threshold, width=8
+        )
+        self.volume_entry.pack(side="left", padx=2)
+        tk.Label(
+            volume_row, text=" 分贝的文件（留空则不过滤），单位dBFS，数字越小，音量越小"
+        ).pack(side="left", padx=2)
 
         # 输入文件区域
         input_frame = tk.LabelFrame(main_frame, text="输入文件", padx=5, pady=5)
@@ -368,6 +386,44 @@ class AudioConverter:
 
         return output_path
 
+    def get_audio_loudness(self, input_path):
+        """获取音频平均分贝值（使用ffmpeg的volumedetect滤镜）"""
+        try:
+            cmd = [
+                self.ffmpeg_path.get(),
+                "-i",
+                input_path,
+                "-af",
+                "volumedetect",
+                "-f",
+                "null",
+                "-",
+            ]
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                timeout=60,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            # 使用UTF-8解码，忽略无法解码的字符
+            stderr_output = result.stderr.decode("utf-8", errors="ignore")
+            # 解析输出中的max_volume值
+            for line in stderr_output.split("\n"):
+                if "max_volume" in line:
+                    parts = line.split(":")
+                    if len(parts) > 1:
+                        value_part = parts[1].strip()
+                        num_str = ""
+                        for c in value_part:
+                            if c in "-.0123456789":
+                                num_str += c
+                        if num_str:
+                            return float(num_str)
+            return None
+        except Exception as e:
+            print(f"获取音量失败: {e}")
+            return None
+
     def convert_single_file(self, input_path, output_path):
         """转换单个文件"""
         try:
@@ -474,6 +530,22 @@ class AudioConverter:
                 )
                 self.progress["value"] = i + 1
                 continue
+
+            # 检查音量过滤
+            volume_threshold_str = self.volume_threshold.get().strip()
+            if volume_threshold_str:
+                try:
+                    volume_threshold = float(volume_threshold_str)
+                    loudness = self.get_audio_loudness(input_file)
+                    if loudness is not None and loudness < volume_threshold:
+                        skip_count += 1
+                        self.status_label.config(
+                            text=f"跳过: {Path(input_file).name} (音量 {loudness:.1f} dB 低于阈值 {volume_threshold} dB)"
+                        )
+                        self.progress["value"] = i + 1
+                        continue
+                except ValueError:
+                    pass
 
             # 更新状态
             self.status_label.config(
