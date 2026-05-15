@@ -41,10 +41,10 @@ class AudioConverter:
         self.channel_mode = tk.StringVar(value="mix")  # mix, left, right
 
         # 音量过滤阈值（分贝），留空则不过滤
-        self.volume_threshold = tk.StringVar(value="-22")
+        self.volume_threshold = tk.StringVar(value="-30")
         
         # 最小有效时长（秒），低于此值的音频将被过滤
-        self.min_active_duration = tk.StringVar(value="5")
+        self.min_active_duration = tk.StringVar(value="2")
 
         # 创建UI（带滚动条）
         self.create_scrollable_ui()
@@ -552,25 +552,6 @@ class AudioConverter:
                 self.progress["value"] = i + 1
                 continue
 
-            # 检查音量过滤
-            volume_threshold_str = self.volume_threshold.get().strip()
-            if volume_threshold_str:
-                try:
-                    volume_threshold = float(volume_threshold_str)
-                    min_duration = float(self.min_active_duration.get() or "5")
-                    active_duration = self.get_audio_loudness(
-                        input_file, volume_threshold
-                    )
-                    if active_duration < min_duration:
-                        skip_count += 1
-                        self.status_label.config(
-                            text=f"跳过: {Path(input_file).name} (有效时长 {active_duration:.1f}s < {min_duration}s)"
-                        )
-                        self.progress["value"] = i + 1
-                        continue
-                except ValueError:
-                    pass
-
             # 更新状态
             self.status_label.config(
                 text=f"正在转换: {Path(input_file).name} ({i + 1}/{total})"
@@ -581,8 +562,34 @@ class AudioConverter:
             success, message = self.convert_single_file(input_file, str(output_path))
 
             if success:
-                success_count += 1
-                self.status_label.config(text=f"完成: {Path(input_file).name}")
+                # 转换成功后检查音量过滤
+                volume_threshold_str = self.volume_threshold.get().strip()
+                should_delete = False
+                if volume_threshold_str:
+                    try:
+                        volume_threshold = float(volume_threshold_str)
+                        min_duration = float(self.min_active_duration.get() or "5")
+                        active_duration = self.get_audio_loudness(
+                            output_path, volume_threshold
+                        )
+                        if active_duration < min_duration:
+                            skip_count += 1
+                            should_delete = True
+                            self.status_label.config(
+                                text=f"删除: {Path(input_file).name} (有效时长 {active_duration:.1f}s < {min_duration}s)"
+                            )
+                    except ValueError:
+                        pass
+                
+                if should_delete:
+                    # 删除不符合条件的转换后文件
+                    try:
+                        os.remove(output_path)
+                    except Exception as e:
+                        print(f"删除文件失败: {output_path} - {e}")
+                else:
+                    success_count += 1
+                    self.status_label.config(text=f"完成: {Path(input_file).name}")
             else:
                 fail_count += 1
                 print(f"转换失败: {Path(input_file).name} - {message}")
