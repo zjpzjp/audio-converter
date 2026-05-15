@@ -41,7 +41,10 @@ class AudioConverter:
         self.channel_mode = tk.StringVar(value="mix")  # mix, left, right
 
         # 音量过滤阈值（分贝），留空则不过滤
-        self.volume_threshold = tk.StringVar(value="-20")
+        self.volume_threshold = tk.StringVar(value="-22")
+        
+        # 最小有效时长（秒），低于此值的音频将被过滤
+        self.min_active_duration = tk.StringVar(value="5")
 
         # 创建UI（带滚动条）
         self.create_scrollable_ui()
@@ -207,7 +210,18 @@ class AudioConverter:
         )
         self.volume_entry.pack(side="left", padx=2)
         tk.Label(
-            volume_row, text=" 分贝的文件（留空则不过滤），单位dBFS，数字越小，音量越小"
+            volume_row, text=" dBFS 的文件（留空则不过滤），数字越小，音量越小"
+        ).pack(side="left", padx=2)
+        
+        duration_row = tk.Frame(volume_frame)
+        duration_row.pack(fill="x", pady=2)
+        tk.Label(duration_row, text="最小有效时长 ").pack(side="left", padx=5)
+        self.duration_entry = tk.Entry(
+            duration_row, textvariable=self.min_active_duration, width=8
+        )
+        self.duration_entry.pack(side="left", padx=2)
+        tk.Label(
+            duration_row, text=" 秒（低于此值的音频将被过滤）"
         ).pack(side="left", padx=2)
 
         # 输入文件区域
@@ -386,43 +400,50 @@ class AudioConverter:
 
         return output_path
 
-    def get_audio_loudness(self, input_path):
-        """获取音频平均分贝值（使用ffmpeg的volumedetect滤镜）"""
+    def get_audio_loudness(self, input_path, threshold=-22.0):
+        """统计真实有效声音的累计时长"""
         try:
             cmd = [
                 self.ffmpeg_path.get(),
                 "-i",
                 input_path,
                 "-af",
-                "volumedetect",
+                "ebur128=peak=true",
                 "-f",
                 "null",
                 "-",
             ]
-            result = subprocess.run(
+            process = subprocess.Popen(
                 cmd,
-                capture_output=True,
-                timeout=60,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
-            # 使用UTF-8解码，忽略无法解码的字符
-            stderr_output = result.stderr.decode("utf-8", errors="ignore")
-            # 解析输出中的max_volume值
+            _, stderr = process.communicate(timeout=60)
+            stderr_output = stderr.decode("utf-8", errors="ignore")
+            
+            count_above_threshold = 0
+            import re
+            
             for line in stderr_output.split("\n"):
-                if "max_volume" in line:
-                    parts = line.split(":")
-                    if len(parts) > 1:
-                        value_part = parts[1].strip()
-                        num_str = ""
-                        for c in value_part:
-                            if c in "-.0123456789":
-                                num_str += c
-                        if num_str:
-                            return float(num_str)
-            return None
+                # 同时检查 TPK 和 M
+                tpk_match = re.search(r'TPK:\s+(-?\d+\.?\d*)\s*dBFS', line)
+                m_match = re.search(r'M:\s+(-?\d+\.?\d*)', line)
+                
+                if tpk_match and m_match:
+                    tpk_value = float(tpk_match.group(1))
+                    m_value = float(m_match.group(1))
+                    
+                    # 必须同时满足：TPK > 阈值 AND M > -100（不是静音）
+                    if tpk_value > threshold and m_value > -100:
+                        count_above_threshold += 1
+            
+            total_seconds = count_above_threshold * 0.1
+            print(f"超过 {threshold}dBFS 的采样点: {count_above_threshold} 个，累计时长: {total_seconds:.1f} 秒")
+            return total_seconds
         except Exception as e:
             print(f"获取音量失败: {e}")
-            return None
+            return 0.0
 
     def convert_single_file(self, input_path, output_path):
         """转换单个文件"""
@@ -536,11 +557,14 @@ class AudioConverter:
             if volume_threshold_str:
                 try:
                     volume_threshold = float(volume_threshold_str)
-                    loudness = self.get_audio_loudness(input_file)
-                    if loudness is not None and loudness < volume_threshold:
+                    min_duration = float(self.min_active_duration.get() or "5")
+                    active_duration = self.get_audio_loudness(
+                        input_file, volume_threshold
+                    )
+                    if active_duration < min_duration:
                         skip_count += 1
                         self.status_label.config(
-                            text=f"跳过: {Path(input_file).name} (音量 {loudness:.1f} dB 低于阈值 {volume_threshold} dB)"
+                            text=f"跳过: {Path(input_file).name} (有效时长 {active_duration:.1f}s < {min_duration}s)"
                         )
                         self.progress["value"] = i + 1
                         continue
